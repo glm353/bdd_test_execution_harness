@@ -18,3 +18,7 @@ Thumbs.db
 # Recorded AWS cache snapshots (generated at runtime; the committed test snapshot
 # lives in tests/fixtures/). Keep the cache/ dir via .gitkeep, ignore its contents.
 cache/*.json
+cache/_scan_scratch/
+
+# Ad hoc siloed-testing outputs (generated live by adhoc_tools/; never committed).
+adhoc_tools/*.json

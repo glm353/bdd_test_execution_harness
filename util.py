@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import subprocess
 import time
@@ -45,6 +46,43 @@ _TIMESTAMP_GLUE_TYPES = {"timestamp", "timestamp with time zone", "timestamptz"}
 def now_iso() -> str:
     """UTC timestamp as an ISO-8601 string (used for cache/record metadata)."""
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+# Athena renders timestamps as 'YYYY-MM-DD HH:MM:SS[.ffffff]' with a space separator and, for
+# `timestamp with time zone`, a trailing zone (' UTC' or an offset) - NOT ISO-8601. A bare `date`
+# column comes back as 'YYYY-MM-DD'. This regex captures those shapes so we can normalise them.
+_ATHENA_TS_RE = re.compile(
+    r"^(?P<date>\d{4}-\d{2}-\d{2})"
+    r"(?:[ T](?P<time>\d{2}:\d{2}:\d{2}(?:\.\d+)?))?"
+    r"(?:\s*(?P<tz>UTC|Z|[+-]\d{2}:?\d{2}))?$"
+)
+
+
+def normalize_timestamp(raw: str | None) -> str | None:
+    """Normalise an Athena timestamp/date string to ISO-8601.
+
+    'YYYY-MM-DD HH:MM:SS.ffffff UTC' -> 'YYYY-MM-DDTHH:MM:SS.ffffff+00:00' (T separator, offset).
+    A bare date ('YYYY-MM-DD') is already valid ISO-8601 and returned unchanged. Anything that
+    doesn't match a recognised Athena shape is returned verbatim - we normalise, never drop data.
+    """
+    if raw is None:
+        return None
+    s = raw.strip()
+    if not s:
+        return None
+    m = _ATHENA_TS_RE.match(s)
+    if not m:
+        return raw
+    date, time_, tz = m.group("date"), m.group("time"), m.group("tz")
+    if time_ is None:
+        return date  # date-only is already ISO-8601
+    iso = f"{date}T{time_}"
+    if tz:
+        if tz in ("UTC", "Z"):
+            iso += "+00:00"
+        else:  # ±HHMM or ±HH:MM -> ±HH:MM
+            iso += tz if ":" in tz else f"{tz[:3]}:{tz[3:]}"
+    return iso
 
 
 # --- table-name helpers (logical <-> env-qualified) ------------------------------------------------
@@ -269,7 +307,13 @@ class AwsWatermarkSource:
         rows = self.run_athena(sql, fetch=True)
         if not rows or rows[0][0] is None:
             return None
-        return rows[0][0]
+        return normalize_timestamp(rows[0][0])
+
+
+def timestamp_columns(columns: list[tuple[str, str]]) -> list[str]:
+    """Names of the timestamp-typed columns in ``columns`` ([(name, glue_type), ...])."""
+    return [name for name, gtype in columns
+            if gtype.split("(")[0].strip().lower() in _TIMESTAMP_GLUE_TYPES]
 
 
 def pick_watermark_column(columns: list[tuple[str, str]],
@@ -279,14 +323,13 @@ def pick_watermark_column(columns: list[tuple[str, str]],
     ``columns`` is [(name, glue_type), ...]. Returns the column name, or None if the table has no
     timestamp-typed column at all.
     """
-    timestamp_cols = [name for name, gtype in columns
-                      if gtype.split("(")[0].strip().lower() in _TIMESTAMP_GLUE_TYPES]
-    if not timestamp_cols:
+    ts_cols = timestamp_columns(columns)
+    if not ts_cols:
         return None
-    for name in timestamp_cols:
+    for name in ts_cols:
         if name.lower() == preferred.lower():
             return name
-    return timestamp_cols[0]
+    return ts_cols[0]
 
 
 # --- JSON cache (record / replay) ------------------------------------------------------------------

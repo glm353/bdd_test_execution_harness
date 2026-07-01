@@ -1,6 +1,6 @@
 {
   "env_code": "dev",
-  "recorded_at": "2026-07-01T00:00:00+00:00",
+  "recorded_at": "2026-07-01T02:50:09+00:00",
   "watermarks": [
     {
       "table": {
@@ -9,20 +9,20 @@
         "timestamp_column": null
       },
       "timestamp_column": "modifiedon",
-      "max_timestamp": "2026-06-30T09:15:00",
+      "max_timestamp": "2026-06-11T05:47:38.312726+00:00",
       "row_source": "cache",
-      "recorded_at": "2026-07-01T00:00:00+00:00"
+      "recorded_at": "2026-07-01T02:50:09+00:00"
     },
     {
       "table": {
         "database": "domain_core_curriculum",
-        "table": "holiday",
+        "table": "class",
         "timestamp_column": null
       },
       "timestamp_column": "modifiedon",
-      "max_timestamp": "2026-06-29T22:00:00",
+      "max_timestamp": "2026-05-26T16:06:50.699391+00:00",
       "row_source": "cache",
-      "recorded_at": "2026-07-01T00:00:00+00:00"
+      "recorded_at": "2026-07-01T02:50:09+00:00"
     }
   ]
 }

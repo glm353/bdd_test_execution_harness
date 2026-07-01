@@ -28,6 +28,7 @@ watermark.py   THE COMPONENT — serializable dataclasses + discover_watermarks(
 util.py        all supporting utilities: AWS auth (Okta SSO), Athena/Glue, naming, JSON cache
 cache/         recorded AWS snapshots (git-ignored; used for offline local testing)
 tests/         offline pytest suite + a committed fixture cache
+adhoc_tools/   throwaway scripts for siloed live-AWS testing & validation (NOT part of the component)
 ```
 
 ## Setup
@@ -84,6 +85,25 @@ timestamp column is auto-detected from the Glue schema (preferring `modifiedon`)
 ```bash
 python -m pytest        # 12 offline tests; no AWS required
 ```
+
+## `adhoc_tools/` — siloed testing & validation
+
+Scripts in `adhoc_tools/` are **not part of Component 1**. They exist purely to exercise and validate
+the component against **live AWS in isolation** ("siloed" testing) — separate from the offline pytest
+suite, which never touches AWS. They are deliberately kept out of `watermark.py`/`util.py` so the
+component stays lean (see CLAUDE.md's two-core-files rule); treat them as throwaway harness code, not a
+supported API.
+
+They cover the parts the offline tests can't reach — the real Glue + Athena + Okta path:
+
+- **Enumeration** — crawl the Glue Catalog to list every `database.table` in the `_dev` databases
+  (cheap; no Athena), producing the input set to run the component against.
+- **Batch scan & validation** — run `discover_watermarks` (mode `record`) over that set one table at a
+  time (so one failure doesn't abort the batch), and emit a status/coverage matrix + an Athena
+  cost tally for spot-checking results against manual queries.
+
+Because they hit live AWS, they need valid Okta-SSO credentials (`WATERMARK_AWS_PROFILE`) and are run
+manually, on demand — never as part of `pytest`.
 
 ## Scope
 

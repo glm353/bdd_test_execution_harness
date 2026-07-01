@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -162,6 +163,13 @@ def _record(request: WatermarkRequest, *, source: "util.AwsWatermarkSource",
                     f"{ref.qualified}: no timestamp-typed column found in the Glue schema and no "
                     f"timestamp_column override given. Columns: {[c[0] for c in columns]}"
                 )
+            # Auto-detect fell back off 'modifiedon' -> surface the choice; a wrong silent pick here
+            # would poison the watermark. Set TableRef.timestamp_column to make it explicit.
+            if column.lower() != util.DEFAULT_WATERMARK_COLUMN.lower():
+                candidates = util.timestamp_columns(columns)
+                print(f"[warn] {ref.qualified}: no '{util.DEFAULT_WATERMARK_COLUMN}' column; "
+                      f"auto-selected '{column}' from timestamp candidates {candidates}. "
+                      f"Pass timestamp_column to override.", file=sys.stderr)
         max_ts = source.max_timestamp(database, ref.table, column)
         watermarks.append(TableWatermark(
             table=ref, timestamp_column=column, max_timestamp=max_ts,

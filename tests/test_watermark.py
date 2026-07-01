@@ -56,7 +56,7 @@ def test_result_json_roundtrip_is_identical():
         recorded_at="2026-07-01T00:00:00+00:00",
         watermarks=[
             wm.TableWatermark(
-                table=wm.TableRef("domain_core_curriculum", "holiday"),
+                table=wm.TableRef("domain_core_curriculum", "class"),
                 timestamp_column="modifiedon",
                 max_timestamp="2026-06-30T13:01:05",
                 row_source="aws",
@@ -70,10 +70,10 @@ def test_result_json_roundtrip_is_identical():
 
 def test_request_roundtrip_and_from_specs():
     req = wm.WatermarkRequest.from_specs(
-        ["molecular_vms_beakon.contractor", "domain_core_curriculum.holiday"], env_code="dev"
+        ["molecular_vms_beakon.contractor", "domain_core_curriculum.class"], env_code="dev"
     )
     assert [t.qualified for t in req.tables] == [
-        "molecular_vms_beakon.contractor", "domain_core_curriculum.holiday"
+        "molecular_vms_beakon.contractor", "domain_core_curriculum.class"
     ]
     assert wm.WatermarkRequest.from_dict(req.to_dict()).to_dict() == req.to_dict()
 
@@ -95,21 +95,66 @@ def test_pick_watermark_column_none_when_no_timestamp():
     assert util.pick_watermark_column([("id", "string"), ("name", "varchar(50)")]) is None
 
 
+def test_timestamp_columns_filters_to_timestamp_types():
+    cols = [("id", "bigint"), ("createdon", "timestamp"),
+            ("modifiedon", "timestamp with time zone"), ("name", "string")]
+    assert util.timestamp_columns(cols) == ["createdon", "modifiedon"]
+
+
+def test_record_warns_when_modifiedon_absent(tmp_path, capsys):
+    # No 'modifiedon' + multiple timestamp cols -> auto-pick must warn (a silent wrong pick is a bug).
+    request = wm.WatermarkRequest.from_specs(["domain_core_curriculum.class"], env_code="dev")
+    source = FakeSource(
+        schemas={"domain_core_curriculum_dev.class": [
+            ("createdon", "timestamp"), ("archivedon", "timestamp")]},
+        maxes={("domain_core_curriculum_dev", "class", "createdon"): "2026-01-01T00:00:00+00:00"},
+    )
+    wm.discover_watermarks(request, mode="record", cache_dir=tmp_path, source=source)
+    err = capsys.readouterr().err
+    assert "[warn]" in err and "createdon" in err
+
+
+# --- Athena timestamp -> ISO-8601 normalization ----------------------------------------------------
+
+
+@pytest.mark.parametrize("raw, expected", [
+    # Athena `timestamp with time zone` (space separator, ' UTC') -> ISO-8601 with offset.
+    ("2026-06-11 05:47:38.312726 UTC", "2026-06-11T05:47:38.312726+00:00"),
+    ("2026-06-11 05:47:38 UTC", "2026-06-11T05:47:38+00:00"),
+    # Athena `timestamp` (no zone) -> just fix the separator.
+    ("2026-06-11 05:47:38.312", "2026-06-11T05:47:38.312"),
+    # 'Z' and explicit numeric offsets.
+    ("2026-06-11 05:47:38Z", "2026-06-11T05:47:38+00:00"),
+    ("2026-06-11 05:47:38 +10:00", "2026-06-11T05:47:38+10:00"),
+    ("2026-06-11 05:47:38 +1000", "2026-06-11T05:47:38+10:00"),
+    # Bare `date` is already ISO-8601.
+    ("2026-06-11", "2026-06-11"),
+    # Already ISO-8601 -> idempotent.
+    ("2026-06-11T05:47:38+00:00", "2026-06-11T05:47:38+00:00"),
+    # Empty / null -> None; unrecognised -> verbatim (never dropped).
+    ("", None),
+    (None, None),
+    ("not a timestamp", "not a timestamp"),
+])
+def test_normalize_timestamp(raw, expected):
+    assert util.normalize_timestamp(raw) == expected
+
+
 # --- record -> replay ------------------------------------------------------------------------------
 
 
 def test_record_then_replay_are_equal(tmp_path):
     request = wm.WatermarkRequest.from_specs(
-        ["molecular_vms_beakon.contractor", "domain_core_curriculum.holiday"], env_code="dev"
+        ["molecular_vms_beakon.contractor", "domain_core_curriculum.class"], env_code="dev"
     )
     source = FakeSource(
         schemas={
             "molecular_vms_beakon_dev.contractor": [("id", "string"), ("modifiedon", "timestamp")],
-            "domain_core_curriculum_dev.holiday": [("modifiedon", "timestamp")],
+            "domain_core_curriculum_dev.class": [("modifiedon", "timestamp")],
         },
         maxes={
             ("molecular_vms_beakon_dev", "contractor", "modifiedon"): "2026-06-30T09:15:00",
-            ("domain_core_curriculum_dev", "holiday", "modifiedon"): "2026-06-29T22:00:00",
+            ("domain_core_curriculum_dev", "class", "modifiedon"): "2026-06-29T22:00:00",
         },
     )
 
@@ -117,7 +162,7 @@ def test_record_then_replay_are_equal(tmp_path):
     assert util.cache_path("dev", tmp_path).exists()
     assert recorded.by_table() == {
         "molecular_vms_beakon.contractor": "2026-06-30T09:15:00",
-        "domain_core_curriculum.holiday": "2026-06-29T22:00:00",
+        "domain_core_curriculum.class": "2026-06-29T22:00:00",
     }
     assert all(w.row_source == "aws" for w in recorded.watermarks)
 
@@ -128,36 +173,36 @@ def test_record_then_replay_are_equal(tmp_path):
 
 
 def test_auto_mode_uses_cache_when_present(tmp_path):
-    request = wm.WatermarkRequest.from_specs(["domain_core_curriculum.holiday"], env_code="dev")
+    request = wm.WatermarkRequest.from_specs(["domain_core_curriculum.class"], env_code="dev")
     source = FakeSource(
-        schemas={"domain_core_curriculum_dev.holiday": [("modifiedon", "timestamp")]},
-        maxes={("domain_core_curriculum_dev", "holiday", "modifiedon"): "2026-06-29T22:00:00"},
+        schemas={"domain_core_curriculum_dev.class": [("modifiedon", "timestamp")]},
+        maxes={("domain_core_curriculum_dev", "class", "modifiedon"): "2026-06-29T22:00:00"},
     )
     wm.discover_watermarks(request, mode="record", cache_dir=tmp_path, source=source)
 
     # A source that would explode if touched proves 'auto' replayed from cache instead of querying.
     boom = FakeSource(schemas={}, maxes={})
     result = wm.discover_watermarks(request, mode="auto", cache_dir=tmp_path, source=boom)
-    assert result.by_table() == {"domain_core_curriculum.holiday": "2026-06-29T22:00:00"}
+    assert result.by_table() == {"domain_core_curriculum.class": "2026-06-29T22:00:00"}
     assert boom.queried == []
 
 
 def test_explicit_timestamp_column_skips_autodetect(tmp_path):
-    ref = wm.TableRef.from_string("domain_core_curriculum.holiday", timestamp_column="createdon")
+    ref = wm.TableRef.from_string("domain_core_curriculum.class", timestamp_column="createdon")
     request = wm.WatermarkRequest(tables=[ref], env_code="dev")
     source = FakeSource(
         schemas={},  # describe_columns must NOT be called when an override is given
-        maxes={("domain_core_curriculum_dev", "holiday", "createdon"): "2026-01-01T00:00:00"},
+        maxes={("domain_core_curriculum_dev", "class", "createdon"): "2026-01-01T00:00:00"},
     )
     result = wm.discover_watermarks(request, mode="record", cache_dir=tmp_path, source=source)
     assert result.watermarks[0].timestamp_column == "createdon"
 
 
 def test_replay_missing_table_raises(tmp_path):
-    seed = wm.WatermarkRequest.from_specs(["domain_core_curriculum.holiday"], env_code="dev")
+    seed = wm.WatermarkRequest.from_specs(["domain_core_curriculum.class"], env_code="dev")
     source = FakeSource(
-        schemas={"domain_core_curriculum_dev.holiday": [("modifiedon", "timestamp")]},
-        maxes={("domain_core_curriculum_dev", "holiday", "modifiedon"): "2026-06-29T22:00:00"},
+        schemas={"domain_core_curriculum_dev.class": [("modifiedon", "timestamp")]},
+        maxes={("domain_core_curriculum_dev", "class", "modifiedon"): "2026-06-29T22:00:00"},
     )
     wm.discover_watermarks(seed, mode="record", cache_dir=tmp_path, source=source)
 
@@ -171,12 +216,12 @@ def test_replay_missing_table_raises(tmp_path):
 
 def test_discover_against_fixture_cache():
     request = wm.WatermarkRequest.from_specs(
-        ["molecular_vms_beakon.contractor", "domain_core_curriculum.holiday"], env_code="dev"
+        ["molecular_vms_beakon.contractor", "domain_core_curriculum.class"], env_code="dev"
     )
     result = wm.discover_watermarks(request, mode="replay", cache_dir=FIXTURE_CACHE)
     assert result.by_table() == {
-        "molecular_vms_beakon.contractor": "2026-06-30T09:15:00",
-        "domain_core_curriculum.holiday": "2026-06-29T22:00:00",
+        "molecular_vms_beakon.contractor": "2026-06-11T05:47:38.312726+00:00",
+        "domain_core_curriculum.class": "2026-05-26T16:06:50.699391+00:00",
     }
     # Fixture is an offline snapshot -> provenance is 'cache'.
     assert all(w.row_source == "cache" for w in result.watermarks)
