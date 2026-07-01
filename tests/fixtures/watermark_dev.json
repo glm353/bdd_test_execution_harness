@@ -6,7 +6,7 @@
       "table": {
         "database": "molecular_vms_beakon",
         "table": "contractor",
-        "timestamp_column": null
+        "timestamp_column": "modifiedon"
       },
       "timestamp_column": "modifiedon",
       "max_timestamp": "2026-06-11T05:47:38.312726+00:00",
@@ -17,7 +17,7 @@
       "table": {
         "database": "domain_core_curriculum",
         "table": "class",
-        "timestamp_column": null
+        "timestamp_column": "modifiedon"
       },
       "timestamp_column": "modifiedon",
       "max_timestamp": "2026-05-26T16:06:50.699391+00:00",

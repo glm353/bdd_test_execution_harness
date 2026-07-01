@@ -31,13 +31,20 @@ import util
 
 @dataclass(frozen=True)
 class TableRef:
-    """One input table. ``timestamp_column`` is an optional per-table watermark-column override."""
+    """One input table.
+
+    ``timestamp_column`` is the watermark column. It defaults to ``modifiedon`` (util.
+    DEFAULT_WATERMARK_COLUMN) - the CDCv2 CDC/audit column, present on 100% of the ``_aud`` gold
+    tables this component targets. Override it per-table for a non-standard column, or pass ``None``
+    to fall back to auto-detection from the Glue schema.
+    """
     database: str
     table: str
-    timestamp_column: str | None = None
+    timestamp_column: str | None = util.DEFAULT_WATERMARK_COLUMN
 
     @classmethod
-    def from_string(cls, spec: str, timestamp_column: str | None = None) -> "TableRef":
+    def from_string(cls, spec: str,
+                    timestamp_column: str | None = util.DEFAULT_WATERMARK_COLUMN) -> "TableRef":
         """Build from a 'database.table' string."""
         database, table = util.split_qualified(spec)
         return cls(database=database, table=table, timestamp_column=timestamp_column)
@@ -52,8 +59,9 @@ class TableRef:
 
     @classmethod
     def from_dict(cls, d: dict) -> "TableRef":
+        # Absent key -> the modifiedon default; an explicit null is preserved as None (= auto-detect).
         return cls(database=d["database"], table=d["table"],
-                   timestamp_column=d.get("timestamp_column"))
+                   timestamp_column=d.get("timestamp_column", util.DEFAULT_WATERMARK_COLUMN))
 
 
 @dataclass

@@ -26,8 +26,9 @@ Don't split these into a package without a reason — simplicity is a design goa
 - **Env-overridable config** — see `util.load_config`; region defaults to `ap-southeast-2`.
 - **AWS auth** — Okta SSO via a `credential_process` profile (`util.resolve_session` does an STS
   preflight). Profile via `WATERMARK_AWS_PROFILE`.
-- **Watermark column** — auto-detected from the Glue schema, preferring `modifiedon` (the CDCv2 CDC
-  column); overridable per-table via `TableRef.timestamp_column`.
+- **Watermark column** — defaults to `modifiedon` (the CDCv2 CDC/audit column; present on 100% of the
+  `_aud` gold tables this targets). Override per-table via `TableRef.timestamp_column`, or pass `None`
+  to auto-detect a timestamp-typed column from the Glue schema (still preferring `modifiedon`).
 - **Naming** — logical schemas are env-suffixed at query time (`schema_with_env`, e.g. `_dev`).
 
 ## Caching / local testing

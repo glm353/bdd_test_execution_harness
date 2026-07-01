@@ -75,7 +75,36 @@ Unrecognised shapes pass through verbatim (never drop data). +11 parametrized un
   Replaced with two real recorded rows (`molecular_vms_beakon.contractor`,
   `domain_core_curriculum.class`); tests updated to real values.
 - **.gitignore** now excludes `adhoc_tools/*.json` and `cache/_scan_scratch/`.
-- Tests: **12 → 25**, all passing offline.
+- Tests: **12 → 26**, all passing offline.
+
+---
+
+## Watermark column: analysis + hardcoded `modifiedon` default
+
+Follow-up question: is `modifiedon` actually the right watermark column? Crawled the Glue schema of
+**all 4,135 dev tables** (`adhoc_tools/analyze_schemas.py` — Glue-only, `get_tables` returns full
+column metadata, no Athena):
+
+- `modifiedon` (timestamp-typed) is on only **43% of all tables** — but that headline is misleading.
+  By medallion layer: **`_aud` gold 100%, silver 100%, `_g`/`_s` 100%, base 76%**; raw/staging/
+  bronze/view ≈ 0%. The low overall is entirely the layers that are **not** watermark targets.
+- Next most common: `date_created` / `date_updated` (~23% each) — the ETL/load columns on
+  bronze/staging. **113 tables carry `modifiedon` as a `string`** (raw/bronze); ts-only detection
+  correctly skips those.
+
+Cross-checked against the **Claude Masterfiles** (`.../Claude Masterfiles/uon-integration/`): the
+CDCv2 medallion is **`_raw` (bronze) → `<name>` (silver) → `_aud` (gold/audit, "changed data captured
+each run")**, and the framework's own **Watermark** = an ISO date/timestamp marker for incremental
+reads (`SourceQueryWatermark`). Confirms (a) `_aud` is the gold/rollback target, (b) ISO-8601 is the
+right normalized form. (Correction to earlier framing: `_aud` **is** gold, not a side audit table; the
+`_b/_s/_g` suffixes are a separate domain-table convention.)
+
+**Decision (user):** we only concern ourselves with `_aud` tables, where `modifiedon` is universal, so
+**hardcode `modifiedon` as `TableRef.timestamp_column`'s default** (was `null`). Per-table override
+still works; passing `timestamp_column=None` opts back into Glue auto-detect (with the `[warn]`).
+`from_dict`: absent key → `modifiedon`, explicit `null` → `None`. Fixture nested column updated to
+`modifiedon`; README + CLAUDE.md document the default and the `_aud`=gold rationale. Verified live on a
+real `_aud` table (`molecular_vms_beakon.contractor_aud`).
 
 ---
 
@@ -100,3 +129,5 @@ static `[cdcv2-dev]` block so the credential_process auto-refreshes on demand. R
   still out of scope (see SESSION_1).
 - `modifiedon` stability across a rollback (Component 2's `output_1a == output_1b` invariant) — still
   unvalidated; confirm before relying on it.
+- **String-typed `modifiedon`** on 113 raw/bronze tables is skipped by ts-only detection. Not handled
+  (we only target `_aud`); would need a `CAST` path if raw/bronze ever become watermark targets.

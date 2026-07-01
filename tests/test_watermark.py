@@ -50,6 +50,17 @@ def test_table_ref_from_string_and_roundtrip():
     assert wm.TableRef.from_dict(ref.to_dict()) == ref
 
 
+def test_table_ref_defaults_to_modifiedon():
+    # The watermark column defaults to 'modifiedon' (never null); explicit None opts into auto-detect.
+    assert wm.TableRef.from_string("db.t").timestamp_column == util.DEFAULT_WATERMARK_COLUMN
+    assert wm.WatermarkRequest.from_specs(["db.t"]).tables[0].timestamp_column == "modifiedon"
+    assert wm.TableRef("db", "t", timestamp_column=None).timestamp_column is None
+    # An absent key deserializes to the default; an explicit null is preserved as None.
+    assert wm.TableRef.from_dict({"database": "db", "table": "t"}).timestamp_column == "modifiedon"
+    assert wm.TableRef.from_dict(
+        {"database": "db", "table": "t", "timestamp_column": None}).timestamp_column is None
+
+
 def test_result_json_roundtrip_is_identical():
     result = wm.WatermarkResult(
         env_code="dev",
@@ -103,7 +114,9 @@ def test_timestamp_columns_filters_to_timestamp_types():
 
 def test_record_warns_when_modifiedon_absent(tmp_path, capsys):
     # No 'modifiedon' + multiple timestamp cols -> auto-pick must warn (a silent wrong pick is a bug).
-    request = wm.WatermarkRequest.from_specs(["domain_core_curriculum.class"], env_code="dev")
+    # timestamp_column=None opts into auto-detection (the default is now 'modifiedon').
+    ref = wm.TableRef("domain_core_curriculum", "class", timestamp_column=None)
+    request = wm.WatermarkRequest(tables=[ref], env_code="dev")
     source = FakeSource(
         schemas={"domain_core_curriculum_dev.class": [
             ("createdon", "timestamp"), ("archivedon", "timestamp")]},

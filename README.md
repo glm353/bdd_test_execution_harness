@@ -77,8 +77,21 @@ print(result.by_table())   # {"domain_core_curriculum.holiday": "2026-06-29T22:0
 
 Auth follows the V2 convention (see `util.resolve_session`): a `~/.aws/config` profile whose
 `credential_process` runs `okta-aws-cli web` so boto3 refreshes transparently. Override the profile
-with `WATERMARK_AWS_PROFILE`; region defaults to `ap-southeast-2`. Queries run on Athena; the
-timestamp column is auto-detected from the Glue schema (preferring `modifiedon`) or set per-table.
+with `WATERMARK_AWS_PROFILE`; region defaults to `ap-southeast-2`. Queries run on Athena.
+
+### Watermark column
+
+The watermark column **defaults to `modifiedon`** — the CDCv2 CDC/audit column. This component targets
+the **`_aud` (gold/audit) tables** the CDCv2 framework writes each run, and a schema crawl of all dev
+tables confirmed `modifiedon` is present on **100% of `_aud`, silver, and gold tables** (it's only
+sparse on raw/staging layers, which aren't watermark targets). So `TableRef.timestamp_column` is
+`"modifiedon"` unless you override it:
+
+- **Per-table override** — pass `timestamp_column="<col>"` (e.g. `TableRef.from_string("db.t",
+  timestamp_column="date_updated")`) to pin a different column.
+- **Auto-detect** — pass `timestamp_column=None` to instead pick a timestamp-typed column from the
+  Glue schema (still preferring `modifiedon`); a `[warn]` is emitted if a non-`modifiedon` column is
+  chosen, since a silent wrong pick would poison the watermark.
 
 ## Tests
 
