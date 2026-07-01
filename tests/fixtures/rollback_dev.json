@@ -1,0 +1,43 @@
+{
+  "env_code": "dev",
+  "applied": false,
+  "recorded_at": "2026-07-01T00:00:00+00:00",
+  "rollbacks": [
+    {
+      "table": {
+        "database": "molecular_vms_beakon",
+        "table": "contractor",
+        "timestamp_column": "modifiedon"
+      },
+      "aud_table": "contractor_aud",
+      "watermark_column": "modifiedon",
+      "watermark": "2026-06-11T05:47:38.312726+00:00",
+      "removed": 2,
+      "updated": 5,
+      "inserted": 3,
+      "total": 10,
+      "applied": false,
+      "row_source": "cache",
+      "recorded_at": "2026-07-01T00:00:00+00:00",
+      "skipped_reason": null
+    },
+    {
+      "table": {
+        "database": "domain_core_curriculum",
+        "table": "class",
+        "timestamp_column": "modifiedon"
+      },
+      "aud_table": "class_aud",
+      "watermark_column": "modifiedon",
+      "watermark": "2026-05-26T16:06:50.699391+00:00",
+      "removed": 0,
+      "updated": 1,
+      "inserted": 0,
+      "total": 1,
+      "applied": false,
+      "row_source": "cache",
+      "recorded_at": "2026-07-01T00:00:00+00:00",
+      "skipped_reason": null
+    }
+  ]
+}

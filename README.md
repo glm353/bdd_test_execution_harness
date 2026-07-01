@@ -1,11 +1,13 @@
-# BDD Test Execution Harness — Component 1: Watermark Discovery
+# BDD Test Execution Harness — Watermark Discovery + `_aud` Rollback
 
-Part 1 of the V2 BDD Test Execution Harness (Jira **ASP-1613**, sub-task **ASP-1614**).
+Part 1 of the V2 BDD Test Execution Harness (Jira **ASP-1613**; sub-tasks **ASP-1614** / **ASP-1615**).
 
-**Component 1** takes a set of `database.table` references and returns the **max timestamp per
-table** (not per row). The result is a clean, serializable object that later components can chain
-onto — Component 2 (the `_aud`-based rollback) will consume this output to restore the gold/base
-table to a known watermark.
+**Component 1** (`watermark.py`) takes a set of `database.table` references and returns the **max
+timestamp per table** (not per row), as a clean serializable object.
+
+**Component 2** (`rollback.py`) consumes that Component 1 output and, per table, inspects the
+corresponding **`_aud` gold table** to summarize (and optionally roll back) the change rows recorded
+**after** the watermark — restoring the gold/base table to that known-good marker.
 
 This is a standalone tool ("module") that runs side-by-side with other cloned V2 repos.
 
@@ -24,11 +26,12 @@ Component 1 is the measurement at both ends of that loop.
 ## Layout
 
 ```
-watermark.py   THE COMPONENT — serializable dataclasses + discover_watermarks() + CLI
+watermark.py   COMPONENT 1 — serializable dataclasses + discover_watermarks() + CLI
+rollback.py    COMPONENT 2 — serializable dataclasses + rollback_aud() + CLI (consumes C1 output)
 util.py        all supporting utilities: AWS auth (Okta SSO), Athena/Glue, naming, JSON cache
 cache/         recorded AWS snapshots (git-ignored; used for offline local testing)
-tests/         offline pytest suite + a committed fixture cache
-adhoc_tools/   throwaway scripts for siloed live-AWS testing & validation (NOT part of the component)
+tests/         offline pytest suite + committed fixture caches
+adhoc_tools/   throwaway scripts for siloed live-AWS testing & validation (NOT part of the components)
 ```
 
 ## Setup
@@ -73,6 +76,43 @@ result = discover_watermarks(req, mode="auto")
 print(result.by_table())   # {"domain_core_curriculum.holiday": "2026-06-29T22:00:00"}
 ```
 
+## Component 2 — `_aud` rollback
+
+Component 2 takes a Component 1 `WatermarkResult` and, for each table, looks at the `_aud` gold table
+(an Iceberg append-log of change records) to find rows recorded **after** the watermark. Rolling back
+means deleting those rows — `DELETE FROM "<db>"."<table>_aud" WHERE modifiedon > <watermark>` — which
+restores the table's state as of the watermark, so a Component 1 re-run reproduces the original max
+(the C1 → changes → C2 → C1 round-trip invariant).
+
+It shares Component 1's `record`/`replay`/`auto` cache modes (`cache/rollback_<env>.json`) and adds a
+**dry-run/apply** safety split:
+
+| Mode | Behaviour |
+|------|-----------|
+| dry-run (**default**) | Count what *would* be removed/updated/inserted (by the `_aud` `ind` indicator); **never mutates.** `applied=false`. |
+| `--apply` | Execute the live Iceberg `DELETE` (requires `--mode record`). `applied=true`. |
+
+`_raw`/`_stg` tables are out of scope and skipped with a reason, as are null (empty-table) watermarks.
+
+```bash
+# Dry-run summary from a Component 1 output file (no mutation):
+python -m rollback --from-watermark cache/watermark_dev.json --mode record
+
+# Actually roll back the _aud tables (live DELETE — deliberate, guarded):
+python -m rollback --from-watermark cache/watermark_dev.json --mode record --apply
+```
+
+As a library:
+
+```python
+import watermark as wm
+from rollback import RollbackRequest, rollback_aud
+
+c1 = wm.discover_watermarks(wm.WatermarkRequest.from_specs(["db.contractor"]), mode="replay")
+result = rollback_aud(RollbackRequest.from_watermark_result(c1), mode="record")  # dry-run
+print(result.summary())   # {"tables": 1, "skipped": 0, "removed": 2, "updated": 5, ...}
+```
+
 ## AWS connectivity
 
 Auth follows the V2 convention (see `util.resolve_session`): a `~/.aws/config` profile whose
@@ -96,7 +136,7 @@ sparse on raw/staging layers, which aren't watermark targets). So `TableRef.time
 ## Tests
 
 ```bash
-python -m pytest        # 12 offline tests; no AWS required
+python -m pytest        # 43 offline tests (C1 + C2); no AWS required
 ```
 
 ## `adhoc_tools/` — siloed testing & validation
@@ -120,6 +160,7 @@ manually, on demand — never as part of `pytest`.
 
 ## Scope
 
-In scope (this part): Component 1 only, plus the JSON cache for local testing.
-Out of scope (future): Component 2 (`_aud` rollback), the C1/C2/C1 checkpoint, and the common Behave
-vocabulary handler.
+In scope: Component 1 (watermark discovery) and Component 2 (`_aud` rollback), plus the JSON cache for
+local testing.
+Out of scope (future): the C1/C2/C1 round-trip checkpoint test (ASP-1616, needs a live apply), and the
+common Behave vocabulary handler (ASP-1617/1618).

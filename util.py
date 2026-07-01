@@ -37,6 +37,8 @@ CACHE_DIR = PKG_DIR / "cache"
 DEFAULT_ENV_CODE = "dev"
 DEFAULT_REGION = "ap-southeast-2"  # UoN's AWS region
 DEFAULT_WATERMARK_COLUMN = "modifiedon"  # CDCv2 CDC/audit timestamp column
+IND_COLUMN = "ind"          # CDCv2 _aud operation indicator ('D' = delete, else insert/update)
+DELETE_IND = "D"            # value of IND_COLUMN marking a deleted row
 
 _TERMINAL_QUERY_STATES = {"SUCCEEDED", "FAILED", "CANCELLED"}
 # Glue/Athena types we treat as usable watermark columns.
@@ -85,6 +87,19 @@ def normalize_timestamp(raw: str | None) -> str | None:
     return iso
 
 
+def after_watermark_sql(column: str, watermark: str) -> str:
+    """Athena WHERE predicate: `_aud` rows whose timestamp `column` is strictly after `watermark`.
+
+    `watermark` is a normalized ISO-8601 string (see :func:`normalize_timestamp`), so we parse it with
+    ``from_iso8601_timestamp`` - mirroring the framework's own incremental-read convention
+    (``... WHERE to_timestamp(modifiedon) > to_timestamp('<watermark>')`` in the BaseTemplate). This is
+    the single place to tune the comparison if a live `_aud` column turns out to be tz-naive vs
+    tz-aware. The value is single-quote-escaped; column/watermark otherwise come from our own models.
+    """
+    safe = watermark.replace("'", "''")
+    return f'"{column}" > from_iso8601_timestamp(\'{safe}\')'
+
+
 # --- table-name helpers (logical <-> env-qualified) ------------------------------------------------
 # Ported from poc-pythonbdd/bdd_poc/derivation.py.
 
@@ -100,6 +115,19 @@ def schema_with_env(schema: str, env_code: str = DEFAULT_ENV_CODE) -> str:
     """'domain_core_curriculum' -> 'domain_core_curriculum_dev' (idempotent)."""
     suffix = f"_{env_code}"
     return schema if schema.endswith(suffix) else f"{schema}{suffix}"
+
+
+AUD_SUFFIX = "_aud"  # CDCv2 gold table = <silver>_aud (see the BaseTemplate GoldTable convention)
+
+
+def aud_table_name(table: str) -> str:
+    """'contractor' -> 'contractor_aud' (idempotent).
+
+    The CDCv2 gold/audit table for a logical table is the silver name with an ``_aud`` suffix. Passing
+    an already-``_aud`` name returns it unchanged so Component 2 works whether the caller feeds silver
+    names or the ``_aud`` tables directly.
+    """
+    return table if table.endswith(AUD_SUFFIX) else f"{table}{AUD_SUFFIX}"
 
 
 # --- AWS config ------------------------------------------------------------------------------------
@@ -309,6 +337,32 @@ class AwsWatermarkSource:
             return None
         return normalize_timestamp(rows[0][0])
 
+    def count_changes_since(self, database: str, aud_table: str, column: str,
+                            watermark: str) -> dict[str, int]:
+        """Count `_aud` change rows appended after `watermark`, grouped by the `ind` indicator.
+
+        Returns ``{ind_value: count}`` (e.g. ``{'D': 3, 'U': 10, 'I': 2}``); an empty dict when nothing
+        changed. The caller (Component 2) maps `ind` to removed/updated/inserted. `watermark` is a
+        normalized ISO-8601 string (see :func:`normalize_timestamp`).
+        """
+        sql = (f'SELECT "{IND_COLUMN}", COUNT(*) FROM "{database}"."{aud_table}" '
+               f'WHERE {after_watermark_sql(column, watermark)} GROUP BY "{IND_COLUMN}"')
+        counts: dict[str, int] = {}
+        for ind, n in self.run_athena(sql, fetch=True):
+            counts[(ind or "").strip()] = int(n)
+        return counts
+
+    def delete_changes_since(self, database: str, aud_table: str, column: str,
+                             watermark: str) -> None:
+        """Iceberg row-level DELETE of `_aud` rows appended after `watermark` (the rollback itself).
+
+        Truncates the append-log back to the watermark so a Component 1 re-run reproduces the original
+        max timestamp. Only invoked on the guarded ``apply`` path.
+        """
+        sql = (f'DELETE FROM "{database}"."{aud_table}" '
+               f'WHERE {after_watermark_sql(column, watermark)}')
+        self.run_athena(sql, fetch=False)
+
 
 def timestamp_columns(columns: list[tuple[str, str]]) -> list[str]:
     """Names of the timestamp-typed columns in ``columns`` ([(name, glue_type), ...])."""
@@ -334,23 +388,25 @@ def pick_watermark_column(columns: list[tuple[str, str]],
 
 # --- JSON cache (record / replay) ------------------------------------------------------------------
 # Mirrors the shape of poc-pythonbdd/bdd_poc/cache/discovery_dev.json (top-level metadata + payload).
+# `prefix` selects the component's cache file: 'watermark' (C1) or 'rollback' (C2).
 
-def cache_path(env_code: str, cache_dir: Path = CACHE_DIR) -> Path:
-    return Path(cache_dir) / f"watermark_{env_code}.json"
+def cache_path(env_code: str, cache_dir: Path = CACHE_DIR, *, prefix: str = "watermark") -> Path:
+    return Path(cache_dir) / f"{prefix}_{env_code}.json"
 
 
-def write_cache(payload: dict, env_code: str, cache_dir: Path = CACHE_DIR) -> Path:
-    path = cache_path(env_code, cache_dir)
+def write_cache(payload: dict, env_code: str, cache_dir: Path = CACHE_DIR,
+                *, prefix: str = "watermark") -> Path:
+    path = cache_path(env_code, cache_dir, prefix=prefix)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return path
 
 
-def read_cache(env_code: str, cache_dir: Path = CACHE_DIR) -> dict:
-    path = cache_path(env_code, cache_dir)
+def read_cache(env_code: str, cache_dir: Path = CACHE_DIR, *, prefix: str = "watermark") -> dict:
+    path = cache_path(env_code, cache_dir, prefix=prefix)
     if not path.exists():
         raise FileNotFoundError(
-            f"No watermark cache at {path}. Run with mode='record' (live AWS) first, "
+            f"No {prefix} cache at {path}. Run with mode='record' (live AWS) first, "
             f"or point cache_dir at an existing snapshot."
         )
     return json.loads(path.read_text(encoding="utf-8"))
