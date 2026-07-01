@@ -1,0 +1,28 @@
+{
+  "env_code": "dev",
+  "recorded_at": "2026-07-01T00:00:00+00:00",
+  "watermarks": [
+    {
+      "table": {
+        "database": "molecular_vms_beakon",
+        "table": "contractor",
+        "timestamp_column": null
+      },
+      "timestamp_column": "modifiedon",
+      "max_timestamp": "2026-06-30T09:15:00",
+      "row_source": "cache",
+      "recorded_at": "2026-07-01T00:00:00+00:00"
+    },
+    {
+      "table": {
+        "database": "domain_core_curriculum",
+        "table": "holiday",
+        "timestamp_column": null
+      },
+      "timestamp_column": "modifiedon",
+      "max_timestamp": "2026-06-29T22:00:00",
+      "row_source": "cache",
+      "recorded_at": "2026-07-01T00:00:00+00:00"
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+# Virtual environment
+.venv/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.pytest_tmp/
+
+# Environment / secrets
+.env
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Recorded AWS cache snapshots (generated at runtime; the committed test snapshot
+# lives in tests/fixtures/). Keep the cache/ dir via .gitkeep, ignore its contents.
+cache/*.json
