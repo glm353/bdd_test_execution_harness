@@ -1,11 +1,14 @@
-# BDD Test Execution Harness — Component 1: Watermark Discovery
+# BDD Test Execution Harness — Watermark Discovery + `_aud` Rollback
 
-Part 1 of the V2 BDD Test Execution Harness (Jira **ASP-1613**, sub-task **ASP-1614**).
+Part 1 of the V2 BDD Test Execution Harness (Jira **ASP-1613**; sub-tasks **ASP-1614** / **ASP-1615**).
 
-**Component 1** takes a set of `database.table` references and returns the **max timestamp per
-table** (not per row). The result is a clean, serializable object that later components can chain
-onto — Component 2 (the `_aud`-based rollback) will consume this output to restore the gold/base
-table to a known watermark.
+**Component 1** (`watermark.py`) takes a set of `database.table` references and returns the **max
+timestamp per table** (not per row), as a clean serializable object.
+
+**Component 2** (`rollback.py`) consumes that Component 1 output and, per table, inspects the
+corresponding **`_aud` gold table** (an Iceberg audit append-log) to summarize the change rows
+recorded **after** the watermark and, optionally, **restore the silver table** to that known-good
+marker by replaying the `_aud` log up to the watermark ("Reading 2").
 
 This is a standalone tool ("module") that runs side-by-side with other cloned V2 repos.
 
@@ -24,11 +27,12 @@ Component 1 is the measurement at both ends of that loop.
 ## Layout
 
 ```
-watermark.py   THE COMPONENT — serializable dataclasses + discover_watermarks() + CLI
+watermark.py   COMPONENT 1 — serializable dataclasses + discover_watermarks() + CLI
+rollback.py    COMPONENT 2 — serializable dataclasses + rollback_aud() + CLI (consumes C1 output)
 util.py        all supporting utilities: AWS auth (Okta SSO), Athena/Glue, naming, JSON cache
 cache/         recorded AWS snapshots (git-ignored; used for offline local testing)
-tests/         offline pytest suite + a committed fixture cache
-adhoc_tools/   throwaway scripts for siloed live-AWS testing & validation (NOT part of the component)
+tests/         offline pytest suite + committed fixture caches
+adhoc_tools/   throwaway scripts for siloed live-AWS testing & validation (NOT part of the components)
 ```
 
 ## Setup
@@ -73,6 +77,58 @@ result = discover_watermarks(req, mode="auto")
 print(result.by_table())   # {"domain_core_curriculum.holiday": "2026-06-29T22:00:00"}
 ```
 
+## Component 2 — rollback via `_aud`
+
+Component 2 takes a Component 1 `WatermarkResult` and, for each table, summarizes the `_aud` gold-table
+change rows recorded **after** the watermark (by the `ind` indicator: removed / updated / inserted).
+
+**The CDC model** (confirmed against the framework docs): silver `<name>` and gold `<name>_aud` are
+**independent Iceberg tables**. Silver is the *current state* (one row per primary key); `_aud` is the
+*audit append-log*, storing the full row image at every change. Because `_aud` keeps every image, a
+table's state as of any watermark N is exactly reconstructable from it.
+
+**Rolling back ("Reading 2")** therefore restores **silver**, not `_aud`: `DELETE FROM silver` then
+re-insert the latest `_aud` image per primary key with `modifiedon <= N`. A Component 1 re-run on
+silver then reproduces the original max — the `C1 → changes → C2 → C1` round-trip invariant
+(**ASP-1616, proven live**). Because the rebuild keys on entity identity, it needs each table's
+**primary key**, supplied explicitly via `--pk` (composite keys comma-separated). Without a PK a table
+is still summarized, but `--apply` is refused for it.
+
+It shares Component 1's `record`/`replay`/`auto` cache modes (`cache/rollback_<env>.json`) and adds a
+**dry-run/apply** safety split:
+
+| Flag | Behaviour |
+|------|-----------|
+| dry-run (**default**) | Summarize what changed after the watermark (+ a reconstruction row-count preview when a PK is known); **never mutates.** `applied=false`. |
+| `--apply` | Rebuild silver from `_aud` (`DELETE`+`INSERT`; requires `--mode record`). The pre-rebuild Iceberg snapshot id is recorded first as a time-travel recovery point (the two statements aren't atomic). `applied=true`. |
+| `--force` | With `--apply`, rebuild even when the `_aud` log shows 0 post-watermark changes — for a silver change that bypassed the pipeline and never reached `_aud`. |
+| `--truncate-aud` | With `--apply`, additionally truncate the `_aud` log past the watermark. Optional; currently blocked by the `_aud` partition spec, so its failure is recorded per table (never fatal). |
+
+`_raw`/`_stg` tables are out of scope and skipped with a reason, as are null (empty-table) watermarks.
+Per-table failures are captured in an `error` field so one bad table never aborts a batch.
+
+```bash
+# Dry-run summary from a Component 1 output file (no mutation):
+python -m rollback --from-watermark cache/watermark_dev.json --mode record \
+  --pk molecular_vms_beakon.contractor=beakon_record_number
+
+# Actually roll back — rebuild silver from _aud (live DELETE+INSERT — deliberate, guarded):
+python -m rollback --from-watermark cache/watermark_dev.json --mode record --apply \
+  --pk molecular_vms_beakon.contractor=beakon_record_number
+```
+
+As a library:
+
+```python
+import watermark as wm
+from rollback import RollbackRequest, rollback_aud
+
+c1 = wm.discover_watermarks(wm.WatermarkRequest.from_specs(["db.contractor"]), mode="replay")
+pks = {"db.contractor": ["beakon_record_number"]}
+result = rollback_aud(RollbackRequest.from_watermark_result(c1, primary_keys=pks), mode="record")
+print(result.summary())   # {"tables": 1, "skipped": 0, "removed": 2, "updated": 5, ...}
+```
+
 ## AWS connectivity
 
 Auth follows the V2 convention (see `util.resolve_session`): a `~/.aws/config` profile whose
@@ -96,7 +152,7 @@ sparse on raw/staging layers, which aren't watermark targets). So `TableRef.time
 ## Tests
 
 ```bash
-python -m pytest        # 12 offline tests; no AWS required
+python -m pytest        # 59 offline tests (C1 + C2); no AWS required
 ```
 
 ## `adhoc_tools/` — siloed testing & validation
@@ -120,6 +176,8 @@ manually, on demand — never as part of `pytest`.
 
 ## Scope
 
-In scope (this part): Component 1 only, plus the JSON cache for local testing.
-Out of scope (future): Component 2 (`_aud` rollback), the C1/C2/C1 checkpoint, and the common Behave
-vocabulary handler.
+In scope: Component 1 (watermark discovery) and Component 2 (rollback via `_aud`), plus the JSON cache
+for local testing. The C1/C2/C1 round-trip checkpoint (**ASP-1616**) has been **proven live** on dev
+(see `SESSION_6.md`).
+Out of scope (future): the common Behave vocabulary handler (ASP-1617/1618) and the execution/IO
+separation (ASP-1619).

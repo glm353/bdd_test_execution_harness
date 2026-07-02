@@ -1,0 +1,59 @@
+{
+  "env_code": "dev",
+  "applied": false,
+  "recorded_at": "2026-07-01T00:00:00+00:00",
+  "rollbacks": [
+    {
+      "table": {
+        "database": "molecular_vms_beakon",
+        "table": "contractor",
+        "timestamp_column": "modifiedon"
+      },
+      "aud_table": "contractor_aud",
+      "silver_table": "contractor",
+      "watermark_column": "modifiedon",
+      "watermark": "2026-06-11T05:47:38.312726+00:00",
+      "primary_key": ["beakon_record_number"],
+      "removed": 2,
+      "updated": 5,
+      "inserted": 3,
+      "total": 10,
+      "recon_rows": 150,
+      "silver_rows_before": null,
+      "silver_rows_after": null,
+      "silver_snapshot_before": null,
+      "applied": false,
+      "aud_truncated": false,
+      "row_source": "cache",
+      "recorded_at": "2026-07-01T00:00:00+00:00",
+      "skipped_reason": null,
+      "error": null
+    },
+    {
+      "table": {
+        "database": "domain_core_curriculum",
+        "table": "class",
+        "timestamp_column": "modifiedon"
+      },
+      "aud_table": "class_aud",
+      "silver_table": "class",
+      "watermark_column": "modifiedon",
+      "watermark": "2026-05-26T16:06:50.699391+00:00",
+      "primary_key": null,
+      "removed": 0,
+      "updated": 1,
+      "inserted": 0,
+      "total": 1,
+      "recon_rows": null,
+      "silver_rows_before": null,
+      "silver_rows_after": null,
+      "silver_snapshot_before": null,
+      "applied": false,
+      "aud_truncated": false,
+      "row_source": "cache",
+      "recorded_at": "2026-07-01T00:00:00+00:00",
+      "skipped_reason": null,
+      "error": null
+    }
+  ]
+}
