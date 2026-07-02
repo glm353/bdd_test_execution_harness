@@ -90,14 +90,20 @@ def normalize_timestamp(raw: str | None) -> str | None:
 def after_watermark_sql(column: str, watermark: str) -> str:
     """Athena WHERE predicate: `_aud` rows whose timestamp `column` is strictly after `watermark`.
 
-    `watermark` is a normalized ISO-8601 string (see :func:`normalize_timestamp`), so we parse it with
-    ``from_iso8601_timestamp`` - mirroring the framework's own incremental-read convention
-    (``... WHERE to_timestamp(modifiedon) > to_timestamp('<watermark>')`` in the BaseTemplate). This is
-    the single place to tune the comparison if a live `_aud` column turns out to be tz-naive vs
-    tz-aware. The value is single-quote-escaped; column/watermark otherwise come from our own models.
+    `watermark` is a normalized ISO-8601 string (see :func:`normalize_timestamp`), parsed with
+    ``from_iso8601_timestamp_nanos`` - mirroring the framework's incremental-read convention (a
+    ``from_iso8601`` parse) but at nanosecond precision. The plain ``from_iso8601_timestamp`` returns
+    only ``timestamp(3)`` (milliseconds), which silently truncates a microsecond watermark like
+    ``...312726`` to ``...312`` - so rows sitting exactly at the watermark (``...312726``) compare as
+    strictly *after* it and get wrongly counted/deleted, breaking the ASP-1616 round-trip. Verified
+    live in SESSION_4 (contractor_aud: 2 boundary rows counted with ``_timestamp``, 0 with ``_nanos``).
+    ``modifiedon`` is ``timestamp(6) with time zone``; the nanos parse compares cleanly against it.
+
+    This is the single place to tune the comparison. The value is single-quote-escaped; column/
+    watermark otherwise come from our own models.
     """
     safe = watermark.replace("'", "''")
-    return f'"{column}" > from_iso8601_timestamp(\'{safe}\')'
+    return f'"{column}" > from_iso8601_timestamp_nanos(\'{safe}\')'
 
 
 # --- table-name helpers (logical <-> env-qualified) ------------------------------------------------

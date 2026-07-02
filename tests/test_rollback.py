@@ -65,10 +65,12 @@ def test_aud_table_name_is_idempotent():
 
 
 def test_after_watermark_sql_shape_and_escaping():
-    sql = util.after_watermark_sql("modifiedon", "2026-06-11T05:47:38+00:00")
-    assert sql == '"modifiedon" > from_iso8601_timestamp(\'2026-06-11T05:47:38+00:00\')'
+    # from_iso8601_timestamp_nanos (not ..._timestamp): the plain form is timestamp(3) and truncates
+    # microsecond watermarks to millis, so boundary rows compare as "after" (SESSION_4 live finding).
+    sql = util.after_watermark_sql("modifiedon", "2026-06-11T05:47:38.312726+00:00")
+    assert sql == '"modifiedon" > from_iso8601_timestamp_nanos(\'2026-06-11T05:47:38.312726+00:00\')'
     # single quotes in the value are doubled (defensive, though our watermarks never contain them)
-    assert util.after_watermark_sql("c", "a'b") == '"c" > from_iso8601_timestamp(\'a\'\'b\')'
+    assert util.after_watermark_sql("c", "a'b") == '"c" > from_iso8601_timestamp_nanos(\'a\'\'b\')'
 
 
 def test_bucket_ind_maps_operations():
