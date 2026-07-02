@@ -109,10 +109,42 @@ Actual values from the live run on `molecular_vms_beakon_dev.contractor`:
 millisecond precision (`.949000`); the baseline (µs, `.312726`) round-tripped exactly — the S4
 nanos-precision predicate holds. `wm_baseline.json` and the scratch inputs are git-ignored/disposable.
 
+## Batch end-to-end QA — 10 tables (2026-07-02, read-only, all PASS)
+
+After the PR merged, ran the C1→C2 dry-run playbook across **10 tables in 10 databases** to validate
+the chain at breadth. PKs detected empirically (uniqueness probe `adhoc_tools/s6_pk_probe.py` — same
+method as contractor: `COUNT(DISTINCT col) == COUNT(*)`, one scan/table, CDC-meta columns excluded).
+
+**Single-column PK found (6)** — C2 ran with `--pk`, so `recon_rows` was previewed:
+
+| database.table | rows | PK | C2 result |
+|---|---|---|---|
+| molecular_vms_beakon.contractor | 157 | beakon_record_number | total 0, recon_rows **157** |
+| molecular_vpermit.molecular_user_permit | 19 | permitid | total 0, recon_rows **19** |
+| business_esm_servicenow.accounts | 256 | u_code | total 0, recon_rows **256** |
+| business_research_nuro.grants | 10,908 | grant_number | total 0, recon_rows **10,908** |
+| business_lib_alma.student_details | 11,604 | id | total 0, recon_rows **11,604** |
+| business_erp_techone.staff_details | 49,054 | username | total 0, recon_rows **49,054** |
+
+`recon_rows == live row count` for every one — reconstruction at the current watermark reproduces the
+exact current state (the SESSION_5 property), now confirmed across 6 more tables/databases.
+
+**No single-column PK — likely composite (4)** — C2 ran summary-only (`recon_rows: null`), all
+`total 0`: `domain_core_curriculum.class` (239,973), `business_lms_canvas.cohort` (143,943),
+`business_hr_awams.staff` (6,660; employee_no not unique), `business_sis_nustar.staff_details`
+(27,426; un_hr_user_id ~882 dups). Need Confluence PKs before any `--apply`.
+
+All 10: `total 0`, `applied false`, `error null`, `skipped_reason null` — every fresh C1 watermark is
+a clean no-op checkpoint through C2, proving the chain end-to-end at breadth. No writes. Caveat:
+detected PKs are *empirical* (coincidental uniqueness is possible) — confirm against Confluence before
+trusting one for a live rebuild, especially `techone.staff_details` (only `username` unique, no id col).
+
 ## Housekeeping
 
 - `wm_rollback_input.json` — scratch C2 input regenerated (git-ignored).
-- Nothing committed this session yet; working tree holds the rewrite.
+- `adhoc_tools/s6_pk_probe.py` — throwaway read-only PK uniqueness probe (git-ignored JSON n/a; prints
+  to stdout).
+- Session 6 code committed in `029006a`; merged to `main` via PR #1 (`1730b55`).
 
 ## Deferred (recap)
 
