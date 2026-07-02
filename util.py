@@ -106,6 +106,40 @@ def after_watermark_sql(column: str, watermark: str) -> str:
     return f'"{column}" > from_iso8601_timestamp_nanos(\'{safe}\')'
 
 
+def upto_watermark_sql(column: str, watermark: str) -> str:
+    """Athena WHERE predicate: rows whose timestamp `column` is at or before `watermark`.
+
+    The ``<=`` companion of :func:`after_watermark_sql` (same ``from_iso8601_timestamp_nanos``
+    precision - see that docstring for why nanos). Used by the Reading-2 silver rebuild: the
+    reconstruction selects the latest ``_aud`` image per PK *up to and including* the watermark.
+    Keep both predicates here so the comparison stays tuned in one place.
+    """
+    safe = watermark.replace("'", "''")
+    return f'"{column}" <= from_iso8601_timestamp_nanos(\'{safe}\')'
+
+
+def reconstruction_sql(database: str, aud_table: str, columns: list[str], pk_columns: list[str],
+                       ts_column: str, watermark: str) -> str:
+    """SELECT reproducing a table's state as of `watermark` from its ``_aud`` append-log.
+
+    ``_aud`` stores the full row image at every change, so the latest image per primary key at or
+    before the watermark *is* the row's state then (soft-deletes included: an ``ind='D'`` image comes
+    back flagged, exactly as silver stores it). Validated read-only in SESSION_5 (contractor: 157
+    reconstructed rows == 157 silver rows, EXCEPT both ways = 0). ``changebatchid`` breaks ties for
+    same-timestamp images within a run.
+    """
+    cols = ", ".join(f'"{c}"' for c in columns)
+    pk = ", ".join(f'"{c}"' for c in pk_columns)
+    return (
+        f"SELECT {cols} FROM ("
+        f'SELECT {cols}, ROW_NUMBER() OVER (PARTITION BY {pk} '
+        f'ORDER BY "{ts_column}" DESC, "changebatchid" DESC) AS rn '
+        f'FROM "{database}"."{aud_table}" '
+        f"WHERE {upto_watermark_sql(ts_column, watermark)}"
+        f") WHERE rn = 1"
+    )
+
+
 # --- table-name helpers (logical <-> env-qualified) ------------------------------------------------
 # Ported from poc-pythonbdd/bdd_poc/derivation.py.
 
@@ -134,6 +168,26 @@ def aud_table_name(table: str) -> str:
     names or the ``_aud`` tables directly.
     """
     return table if table.endswith(AUD_SUFFIX) else f"{table}{AUD_SUFFIX}"
+
+
+def silver_table_name(table: str) -> str:
+    """'contractor_aud' -> 'contractor' (idempotent). Inverse of :func:`aud_table_name`."""
+    return table[: -len(AUD_SUFFIX)] if table.endswith(AUD_SUFFIX) else table
+
+
+def parse_pk_spec(spec: str) -> tuple[str, list[str]]:
+    """Parse a CLI ``--pk`` spec: 'db.table=col1,col2' -> ('db.table', ['col1', 'col2']).
+
+    The framework's ``PrimaryKey`` process-config value is a comma-separated column list (composite
+    keys are real, e.g. 'emplid,name_type,effdt'), so the right-hand side mirrors that shape.
+    """
+    qualified, _, cols = spec.partition("=")
+    qualified = qualified.strip()
+    pk = [c.strip() for c in cols.split(",") if c.strip()]
+    if not qualified or "." not in qualified or not pk:
+        raise ValueError(
+            f"Expected a 'database.table=col1[,col2...]' primary-key spec, got {spec!r}")
+    return qualified, pk
 
 
 # --- AWS config ------------------------------------------------------------------------------------
@@ -360,14 +414,63 @@ class AwsWatermarkSource:
 
     def delete_changes_since(self, database: str, aud_table: str, column: str,
                              watermark: str) -> None:
-        """Iceberg row-level DELETE of `_aud` rows appended after `watermark` (the rollback itself).
+        """Iceberg row-level DELETE of `_aud` rows appended after `watermark` (append-log truncate).
 
-        Truncates the append-log back to the watermark so a Component 1 re-run reproduces the original
-        max timestamp. Only invoked on the guarded ``apply`` path.
+        The optional statement (3) of the Reading-2 rollback. NOTE: currently rejected by Athena on
+        the real `_aud` tables - their year+month+day(modifiedon) partition spec makes any write that
+        produces data/delete files fail with INVALID_TABLE_PROPERTY (SESSION_4/5). Kept for when the
+        spec is fixed or a Spark DELETE path exists; only invoked on the guarded ``truncate_aud`` path.
         """
         sql = (f'DELETE FROM "{database}"."{aud_table}" '
                f'WHERE {after_watermark_sql(column, watermark)}')
         self.run_athena(sql, fetch=False)
+
+    def count_rows(self, database: str, table: str) -> int:
+        """SELECT COUNT(*) - used for the pre/post row counts around the silver rebuild."""
+        rows = self.run_athena(f'SELECT COUNT(*) FROM "{database}"."{table}"', fetch=True)
+        return int(rows[0][0])
+
+    def reconstruction_count(self, database: str, aud_table: str, columns: list[str],
+                             pk_columns: list[str], ts_column: str, watermark: str) -> int:
+        """Row count of the Reading-2 reconstruction (state as of `watermark`), read-only.
+
+        Reported on dry-runs as a preview and used as the post-rebuild verification target.
+        """
+        sql = (f"SELECT COUNT(*) FROM ("
+               f"{reconstruction_sql(database, aud_table, columns, pk_columns, ts_column, watermark)}"
+               f")")
+        rows = self.run_athena(sql, fetch=True)
+        return int(rows[0][0])
+
+    def latest_snapshot_id(self, database: str, table: str) -> str | None:
+        """Latest Iceberg snapshot id of `table` (from its ``$history`` metadata table), best-effort.
+
+        Captured before the destructive DELETE+INSERT rebuild as the recovery handle: the pre-rebuild
+        data stays readable via ``SELECT ... FOR VERSION AS OF <id>`` time travel. Returns None if the
+        metadata read fails - the rebuild proceeds, just without a recorded recovery point.
+        """
+        sql = (f'SELECT snapshot_id FROM "{database}"."{table}$history" '
+               f"ORDER BY made_current_at DESC LIMIT 1")
+        try:
+            rows = self.run_athena(sql, fetch=True)
+        except Exception:  # noqa: BLE001 - metadata read is advisory, never blocks the rollback
+            return None
+        return rows[0][0] if rows else None
+
+    def rebuild_silver(self, database: str, silver_table: str, aud_table: str, columns: list[str],
+                       pk_columns: list[str], ts_column: str, watermark: str) -> None:
+        """The Reading-2 rollback, statement (2): restore silver to its state as of `watermark`.
+
+        DELETE FROM silver, then INSERT the reconstruction (latest ``_aud`` image per PK <= watermark).
+        Silver is unpartitioned (SESSION_5), so both statements avoid the `_aud` partition-spec wall.
+        NOT atomic: a failure between the two leaves silver empty - the caller records the pre-rebuild
+        snapshot id (see :meth:`latest_snapshot_id`) as the time-travel recovery point.
+        """
+        self.run_athena(f'DELETE FROM "{database}"."{silver_table}"', fetch=False)
+        cols = ", ".join(f'"{c}"' for c in columns)
+        insert = (f'INSERT INTO "{database}"."{silver_table}" ({cols}) '
+                  f"{reconstruction_sql(database, aud_table, columns, pk_columns, ts_column, watermark)}")
+        self.run_athena(insert, fetch=False)
 
 
 def timestamp_columns(columns: list[tuple[str, str]]) -> list[str]:

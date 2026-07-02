@@ -6,8 +6,9 @@ Part 1 of the V2 BDD Test Execution Harness (Jira **ASP-1613**; sub-tasks **ASP-
 timestamp per table** (not per row), as a clean serializable object.
 
 **Component 2** (`rollback.py`) consumes that Component 1 output and, per table, inspects the
-corresponding **`_aud` gold table** to summarize (and optionally roll back) the change rows recorded
-**after** the watermark — restoring the gold/base table to that known-good marker.
+corresponding **`_aud` gold table** (an Iceberg audit append-log) to summarize the change rows
+recorded **after** the watermark and, optionally, **restore the silver table** to that known-good
+marker by replaying the `_aud` log up to the watermark ("Reading 2").
 
 This is a standalone tool ("module") that runs side-by-side with other cloned V2 repos.
 
@@ -76,30 +77,44 @@ result = discover_watermarks(req, mode="auto")
 print(result.by_table())   # {"domain_core_curriculum.holiday": "2026-06-29T22:00:00"}
 ```
 
-## Component 2 — `_aud` rollback
+## Component 2 — rollback via `_aud`
 
-Component 2 takes a Component 1 `WatermarkResult` and, for each table, looks at the `_aud` gold table
-(an Iceberg append-log of change records) to find rows recorded **after** the watermark. Rolling back
-means deleting those rows — `DELETE FROM "<db>"."<table>_aud" WHERE modifiedon > <watermark>` — which
-restores the table's state as of the watermark, so a Component 1 re-run reproduces the original max
-(the C1 → changes → C2 → C1 round-trip invariant).
+Component 2 takes a Component 1 `WatermarkResult` and, for each table, summarizes the `_aud` gold-table
+change rows recorded **after** the watermark (by the `ind` indicator: removed / updated / inserted).
+
+**The CDC model** (confirmed against the framework docs): silver `<name>` and gold `<name>_aud` are
+**independent Iceberg tables**. Silver is the *current state* (one row per primary key); `_aud` is the
+*audit append-log*, storing the full row image at every change. Because `_aud` keeps every image, a
+table's state as of any watermark N is exactly reconstructable from it.
+
+**Rolling back ("Reading 2")** therefore restores **silver**, not `_aud`: `DELETE FROM silver` then
+re-insert the latest `_aud` image per primary key with `modifiedon <= N`. A Component 1 re-run on
+silver then reproduces the original max — the `C1 → changes → C2 → C1` round-trip invariant
+(**ASP-1616, proven live**). Because the rebuild keys on entity identity, it needs each table's
+**primary key**, supplied explicitly via `--pk` (composite keys comma-separated). Without a PK a table
+is still summarized, but `--apply` is refused for it.
 
 It shares Component 1's `record`/`replay`/`auto` cache modes (`cache/rollback_<env>.json`) and adds a
 **dry-run/apply** safety split:
 
-| Mode | Behaviour |
+| Flag | Behaviour |
 |------|-----------|
-| dry-run (**default**) | Count what *would* be removed/updated/inserted (by the `_aud` `ind` indicator); **never mutates.** `applied=false`. |
-| `--apply` | Execute the live Iceberg `DELETE` (requires `--mode record`). `applied=true`. |
+| dry-run (**default**) | Summarize what changed after the watermark (+ a reconstruction row-count preview when a PK is known); **never mutates.** `applied=false`. |
+| `--apply` | Rebuild silver from `_aud` (`DELETE`+`INSERT`; requires `--mode record`). The pre-rebuild Iceberg snapshot id is recorded first as a time-travel recovery point (the two statements aren't atomic). `applied=true`. |
+| `--force` | With `--apply`, rebuild even when the `_aud` log shows 0 post-watermark changes — for a silver change that bypassed the pipeline and never reached `_aud`. |
+| `--truncate-aud` | With `--apply`, additionally truncate the `_aud` log past the watermark. Optional; currently blocked by the `_aud` partition spec, so its failure is recorded per table (never fatal). |
 
 `_raw`/`_stg` tables are out of scope and skipped with a reason, as are null (empty-table) watermarks.
+Per-table failures are captured in an `error` field so one bad table never aborts a batch.
 
 ```bash
 # Dry-run summary from a Component 1 output file (no mutation):
-python -m rollback --from-watermark cache/watermark_dev.json --mode record
+python -m rollback --from-watermark cache/watermark_dev.json --mode record \
+  --pk molecular_vms_beakon.contractor=beakon_record_number
 
-# Actually roll back the _aud tables (live DELETE — deliberate, guarded):
-python -m rollback --from-watermark cache/watermark_dev.json --mode record --apply
+# Actually roll back — rebuild silver from _aud (live DELETE+INSERT — deliberate, guarded):
+python -m rollback --from-watermark cache/watermark_dev.json --mode record --apply \
+  --pk molecular_vms_beakon.contractor=beakon_record_number
 ```
 
 As a library:
@@ -109,7 +124,8 @@ import watermark as wm
 from rollback import RollbackRequest, rollback_aud
 
 c1 = wm.discover_watermarks(wm.WatermarkRequest.from_specs(["db.contractor"]), mode="replay")
-result = rollback_aud(RollbackRequest.from_watermark_result(c1), mode="record")  # dry-run
+pks = {"db.contractor": ["beakon_record_number"]}
+result = rollback_aud(RollbackRequest.from_watermark_result(c1, primary_keys=pks), mode="record")
 print(result.summary())   # {"tables": 1, "skipped": 0, "removed": 2, "updated": 5, ...}
 ```
 
@@ -136,7 +152,7 @@ sparse on raw/staging layers, which aren't watermark targets). So `TableRef.time
 ## Tests
 
 ```bash
-python -m pytest        # 43 offline tests (C1 + C2); no AWS required
+python -m pytest        # 59 offline tests (C1 + C2); no AWS required
 ```
 
 ## `adhoc_tools/` — siloed testing & validation
@@ -160,7 +176,8 @@ manually, on demand — never as part of `pytest`.
 
 ## Scope
 
-In scope: Component 1 (watermark discovery) and Component 2 (`_aud` rollback), plus the JSON cache for
-local testing.
-Out of scope (future): the C1/C2/C1 round-trip checkpoint test (ASP-1616, needs a live apply), and the
-common Behave vocabulary handler (ASP-1617/1618).
+In scope: Component 1 (watermark discovery) and Component 2 (rollback via `_aud`), plus the JSON cache
+for local testing. The C1/C2/C1 round-trip checkpoint (**ASP-1616**) has been **proven live** on dev
+(see `SESSION_6.md`).
+Out of scope (future): the common Behave vocabulary handler (ASP-1617/1618) and the execution/IO
+separation (ASP-1619).

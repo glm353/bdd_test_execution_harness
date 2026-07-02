@@ -23,5 +23,6 @@ cache/_scan_scratch/
 # Ad hoc siloed-testing outputs (generated live by adhoc_tools/; never committed).
 adhoc_tools/*.json
 
-# Disposable scratch C2 input (hand-edited watermark for ad hoc dry-runs).
+# Disposable scratch C2 inputs (hand-edited / copied watermarks for ad hoc runs & the round-trip).
 wm_rollback_input.json
+wm_baseline.json

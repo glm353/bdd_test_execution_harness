@@ -1,5 +1,12 @@
 # Session 3 — Component 2: `_aud` Rollback
 
+> **⚠️ CORRECTION (SESSION_5/6):** two assumptions below turned out wrong. (1) Silver is **not** a
+> view over `_aud` (`WHERE ind <> 'D'`) — silver and `_aud` are independent Iceberg tables (silver =
+> current state, `_aud` = audit append-log). (2) The rollback semantics chosen here (truncate the
+> `_aud` append-log) were superseded in SESSION_5 by **Reading 2**: restore the *silver* table by
+> replaying `_aud` up to the watermark (the truncate is now an optional stage, blocked by the `_aud`
+> partition spec anyway). `rollback.py` was rewritten accordingly in SESSION_6.
+
 **Date:** 2026-07-01
 **Ticket:** ASP-1613 → sub-task **ASP-1615** *"Implement rollback component using `_aud` tables for
 gold table teardown"*

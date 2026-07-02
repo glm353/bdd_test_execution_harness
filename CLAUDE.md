@@ -7,8 +7,9 @@ Project conventions for this repo. Keep it lean; permanent facts only.
 Part 1 of the V2 BDD Test Execution Harness (ASP-1613). Two chained components:
 - **Component 1** (ASP-1614): watermark discovery — input `database.table` refs, output the max
   timestamp per table.
-- **Component 2** (ASP-1615): `_aud` rollback — consume the C1 output and, per table, summarize (and
-  optionally delete) the `_aud` gold-table change rows recorded after the watermark.
+- **Component 2** (ASP-1615): rollback via `_aud` — consume the C1 output and, per table, summarize
+  the `_aud` change rows recorded after the watermark and (optionally, `--apply`) restore the silver
+  table to its state as of that watermark by replaying the `_aud` log ("Reading 2", SESSION_5).
 
 A standalone tool ("module") meant to run alongside other cloned V2 repos.
 
@@ -23,16 +24,28 @@ A standalone tool ("module") meant to run alongside other cloned V2 repos.
 Don't split these into a package without a reason — simplicity is a design goal here. (C2 was kept a
 separate file from C1; revisit merging only if there's a reason.)
 
-## Component 2 semantics (`_aud` rollback)
+## Component 2 semantics (rollback via `_aud`)
 
-- The `_aud` table is the CDCv2 **gold** table (`GoldTable = <silver>_aud`), an **Iceberg** append-log
-  of change records. Key columns: `ind` (op indicator; `'D'`=delete, else insert/update),
-  `changebatchid`, `modifiedcolumns`, `modifiedon` (the watermark column).
-- **Rollback = append-log truncation:** `DELETE FROM "<db>"."<t>_aud" WHERE modifiedon > <watermark>`.
-  Removing rows appended after the C1 checkpoint restores state as of the watermark (so a C1 re-run
-  reproduces the original max — the ASP-1616 invariant). SQL predicate lives in `util.after_watermark_sql`
-  (the one place to tune tz-naive vs tz-aware comparison during a live smoke test).
-- **Dry-run by default; `apply=True` (`--apply`, requires `mode='record'`) executes the live DELETE.**
+- **CDC model (corrected in SESSION_5):** silver `<name>` and gold `<name>_aud` are **independent
+  Iceberg tables**, both materialized by the Glue job each run. Silver = current state (1 row per PK,
+  latest `ind`); `_aud` = the audit **append-log** (full row image per change). Key columns on both:
+  `ind` (op indicator; `'D'`=delete, else insert/update), `changebatchid`, `modifiedcolumns`,
+  `modifiedon` (the watermark column). Silver is **unpartitioned**; `_aud` is partitioned
+  `year+month+day(modifiedon), changebatchid` — a spec Athena rejects for **any** write to `_aud`.
+- **Rollback = silver rebuild ("Reading 2"):** `DELETE FROM silver` + `INSERT` the reconstruction —
+  latest `_aud` image per **primary key** with `modifiedon <= watermark`
+  (`util.reconstruction_sql`; validated read-only in SESSION_5, exact match). A C1 re-run on silver
+  then reproduces the original max — the ASP-1616 invariant. The PK is supplied explicitly per table
+  (`--pk db.table=col1,col2`, composite OK; from the framework's `PrimaryKey` config / Confluence).
+  No PK → summarized only, apply refused for that table. The SQL predicates live in
+  `util.after_watermark_sql` / `upto_watermark_sql` (the one place to tune the timestamp comparison;
+  must stay `from_iso8601_timestamp_nanos` — SESSION_4 precision defect).
+- **Dry-run by default** (summary + recon row-count preview); `--apply` (requires `mode='record'`)
+  executes the rebuild. DELETE+INSERT is **not atomic** — the pre-rebuild Iceberg snapshot id is
+  recorded first (`silver_snapshot_before`) as the time-travel recovery point.
+- `--truncate-aud` (requires `--apply`) additionally truncates the `_aud` log past the watermark —
+  optional, and currently **blocked** by the `_aud` partition spec; its failure lands in the
+  per-table `error` field (per-table failures never abort a batch).
 - `_raw`/`_stg` tables and null (empty-table) watermarks are skipped with a `skipped_reason`.
 - `ind` bucketing (`bucket_ind`): `'D'`→removed, `'I'`→inserted, else→updated.
 
@@ -66,6 +79,7 @@ new model/mode; keep the suite AWS-free (inject a fake source, as `tests/test_wa
 
 ## Out of scope (future sessions)
 
-The C1/C2/C1 round-trip checkpoint test (ASP-1616, needs a live `--apply`), and the common Behave
-vocabulary handler (ASP-1617/1618). Shared code is kept local to this module for now (no core library
-extraction yet).
+The C1/C2/C1 round-trip checkpoint (ASP-1616) is **done** — proven live on dev in SESSION_6 (silver
+is writable via Athena; `output_1a == output_1b`). Still out of scope: the common Behave vocabulary
+handler (ASP-1617/1618) and the execution/IO separation (ASP-1619). Shared code is kept local to this
+module for now (no core library extraction yet).
