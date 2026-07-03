@@ -80,6 +80,9 @@ new model/mode; keep the suite AWS-free (inject a fake source, as `tests/test_wa
 ## Out of scope (future sessions)
 
 The C1/C2/C1 round-trip checkpoint (ASP-1616) is **done** — proven live on dev in SESSION_6 (silver
-is writable via Athena; `output_1a == output_1b`). Still out of scope: the common Behave vocabulary
-handler (ASP-1617/1618) and the execution/IO separation (ASP-1619). Shared code is kept local to this
-module for now (no core library extraction yet).
+is writable via Athena; `output_1a == output_1b`). The common Behave vocabulary handler (ASP-1617) is
+**in progress**: the vocabulary spec is `VOCABULARY.md` (SESSION_7, awaiting review); the handler
+(`vocab.py`) is built here after sign-off. ASP-1618 (refactor poc-pythonbdd to consume it) is
+**Cancelled** — that repo stays a read-only reference. Still out of scope: the execution/IO
+separation (ASP-1619). Shared code is kept local to this module for now (no core library extraction
+yet).
